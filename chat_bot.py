@@ -1,4 +1,5 @@
 from openai import OpenAI
+from sqlalchemy.exc import SQLAlchemyError
 from db.db import create_tabels, get_session
 from db.models import ChatSession, Message
 import dotenv
@@ -9,6 +10,14 @@ dotenv.load_dotenv()
 
 
 create_tabels()
+
+
+MAX_TOKEN_FOR_START_SUMMARIZE = os.getenv(
+    "MT_FOR_START_SUMMARIZE", default=1000)
+
+MODEL_CHAT_NAME = os.getenv("MODEL_CHAT_NAME")
+MODEL_SUMMARIZE_NAME = os.getenv(
+    "MODEL_SUMMARIZE_NAME", default=MODEL_CHAT_NAME)
 
 
 # class Menu:
@@ -58,6 +67,86 @@ class ChatBot:
             self.messages = [*self.messages, *
                              self.convert_messages(self.get_messages_from_db(self.session.session_id))]
 
+        self.last_summary_threshold = 0
+
+    def summarize_messages(self, max_token=MAX_TOKEN_FOR_START_SUMMARIZE):
+
+        current_total = self.session.total_token
+
+        if current_total < self.last_summary_threshold + max_token:
+            return
+
+        system_messages = [
+            message for message in self.messages if message["role"] == "system"]
+        another_messages = [
+            message for message in self.messages if message["role"] != "system"]
+
+        print(another_messages)
+
+        response = self.llm.chat.completions.create(
+            model=MODEL_SUMMARIZE_NAME,
+            messages=[
+                {
+                    "role": "system", "content": "Summarize the following conversation concisely, preserving all key facts, user preferences, and important details."
+                },
+                *another_messages
+            ],
+            temperature=0.3
+        )
+
+        summarized_message = {
+            "role": "system",
+            "content": f"Summary of previous conversation : {response.choices[0].message.content}"
+        }
+
+        print(summarized_message)
+
+        self.messages = [*system_messages]
+
+        self.delete_messages()
+
+        self.add_message(summarized_message)
+
+        self.last_summary_threshold = current_total
+
+    def delete_messages(self):
+
+        db = get_session()
+
+        try:
+
+            db.query(Message).filter(
+                Message.session_id == self.session.session_id, Message.role != "system").delete()
+
+            db.commit()
+
+        except SQLAlchemyError as e:
+            db.rollback()
+            print(f"Error deleting message : {e}")
+
+            raise
+
+        finally:
+            db.close()
+
+    def update_total_token(self, amount_token):
+        db = get_session()
+
+        try:
+
+            self.session.total_token += amount_token
+
+            db.commit()
+
+        except SQLAlchemyError as e:
+
+            db.rollback()
+            print(f"Error updating tokens: {e}")
+
+            raise
+        finally:
+            db.close()
+
     def get_messages_from_db(self, session_id):
 
         db = get_session()
@@ -66,6 +155,11 @@ class ChatBot:
 
             return db.query(Message).filter_by(session_id=session_id)
 
+        except SQLAlchemyError as e:
+
+            print(f"Error getting messages : {e}")
+
+            raise
         finally:
             db.close()
 
@@ -86,6 +180,12 @@ class ChatBot:
 
             self.messages.append(message)
 
+        except SQLAlchemyError as e:
+
+            db.rollback()
+            print(f"Error adding message : {e}")
+
+            raise
         finally:
             db.close()
 
@@ -103,8 +203,12 @@ class ChatBot:
 
                 return db.query(ChatSession).all()
 
-        finally:
+        except SQLAlchemyError as e:
 
+            print(f"Error getting session : {e}")
+
+            raise
+        finally:
             db.close()
 
     def create_session(self, title=None):
@@ -120,6 +224,12 @@ class ChatBot:
 
             return session
 
+        except SQLAlchemyError as e:
+
+            db.rollback()
+            print(f"Error creating session : {e}")
+
+            raise
         finally:
             db.close()
 
@@ -130,7 +240,7 @@ class ChatBot:
         })
 
         response = self.llm.chat.completions.create(
-            model="gpt-4.1-nano",
+            model=MODEL_CHAT_NAME,
             messages=self.messages,
             temperature=0.7,
             stream=True
@@ -151,9 +261,16 @@ class ChatBot:
                     print(delta, end="", flush=True)
                     time.sleep(0.05)
 
+            if chunk.usage:
+                self.update_total_token(chunk.usage.total_tokens)
+
+        print()
+
         self.add_message({
             "role": "assistant", "content": bot_response
         })
+
+        self.summarize_messages()
 
         return bot_response
 
@@ -170,8 +287,6 @@ class ChatBot:
                 break
 
             bot_answer = self.bot(user_input)
-
-            print(bot_answer)
 
 
 def main():

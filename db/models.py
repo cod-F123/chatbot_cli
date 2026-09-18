@@ -9,6 +9,9 @@ class ChatSession(Base):
     session_id = Column(Integer, primary_key=True)
 
     title = Column(String(100), default="New Session")
+
+    total_token = Column(Integer, default=0)
+
     messages = relationship("Message", back_populates="session")
 
 
