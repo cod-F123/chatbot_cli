@@ -3,3 +3,8 @@ __pycache__/
 .env
 
 *.db
+.venv/
+.pytest_cache/
+*.pyc
+.idea/
+.vscode/
